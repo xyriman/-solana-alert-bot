@@ -1,35 +1,19 @@
 import discord
 import asyncio
 import aiohttp
-from flask import Flask
-from threading import Thread
+import os
+from dotenv import load_dotenv
+load_dotenv()
 
-# Replace with your bot token and Discord channel ID
-DISCORD_TOKEN = "MTM2NTE5ODI5MTE5Mjc3ODg1NA.GAZyyE.5p_k_Kpgo02qUAPDPUOq5N-jemm_opTfb0BVLU"
-CHANNEL_ID = 1227347121720791196
 
-# Replace with your actual Discord channel ID
+DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
+CHANNEL_ID = int(os.getenv("CHANNEL_ID"))
+
 
 intents = discord.Intents.default()
 client = discord.Client(intents=intents)
 
 alerted_tokens = set()
-
-# Flask server to keep Replit alive
-app = Flask('')
-
-@app.route('/')
-def home():
-    return "I'm alive!"
-
-def run_web():
-    app.run(host='0.0.0.0', port=8080)
-
-def keep_alive():
-    thread = Thread(target=run_web)
-    thread.daemon = True  # This allows Replit to exit cleanly and keeps the server running in background
-    thread.start()
-
 
 def safe_int(value):
     try:
@@ -46,14 +30,6 @@ def extract_significant_digits(price_str, digits=4):
         return formatted[:digits].ljust(digits, '0')
     except:
         return "0000"
-
-
-def hamming_distance(a, b):
-    if len(a) != len(b):
-        return max(len(a), len(b))  # fallback for unequal lengths
-    return sum(ch1 != ch2 for ch1, ch2 in zip(a, b))
-
-
 
 async def send_alert(name, link, price_usd, fdv, market_cap, price_4, mcap_4):
     channel = client.get_channel(CHANNEL_ID)
@@ -92,11 +68,20 @@ async def check_tokens(session, token_addresses):
             fdv = safe_int(token.get("fdv"))
             market_cap = safe_int(token.get("marketCap"))
             price_digits = extract_significant_digits(price_usd)
-            mcap_digits = str(market_cap)[:4]
+            mcap_digits = str(market_cap)[:4].ljust(4, '0')
+
+            try:
+                price_num = int(price_digits)
+                mcap_num = int(mcap_digits)
+            except ValueError:
+                price_num = 0
+                mcap_num = 0
+
+            threshold = 10  # Allowable difference in digits
+
             link = token.get("url", "https://dexscreener.com")
 
-            if fdv != market_cap or hamming_distance(price_digits, mcap_digits) > 1:
-
+            if fdv != market_cap or abs(price_num - mcap_num) > threshold:
                 alerted_tokens.add(token_address)
                 await send_alert(name, link, price_usd, fdv, market_cap, price_digits, mcap_digits)
 
@@ -146,5 +131,4 @@ async def on_ready():
         await fetch_and_check()
         await asyncio.sleep(180)  # Check every 3 minutes
 
-keep_alive()
 client.run(DISCORD_TOKEN)
