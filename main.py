@@ -19,28 +19,15 @@ def safe_int(value):
     except:
         return 0
 
-def extract_significant_digits(price_str, digits=4):
-    try:
-        price = float(price_str)
-        if price == 0:
-            return "0000"
-        formatted = f"{price:.12f}".replace('.', '').lstrip('0')
-        return formatted[:digits].ljust(digits, '0')
-    except:
-        return "0000"
-
-async def send_alert(name, link, price_usd, fdv, market_cap, price_4, mcap_4):
+async def send_alert(name, link, fdv, market_cap):
     channel = client.get_channel(CHANNEL_ID)
     if channel is None:
         print("❌ Channel not found. Check CHANNEL_ID.")
         return
     embed = discord.Embed(title="🚨 Solana Token Alert", color=0xff9900)
     embed.add_field(name="Token", value=name, inline=False)
-    embed.add_field(name="Price (USD)", value=price_usd, inline=True)
     embed.add_field(name="FDV", value=f"${fdv:,}", inline=True)
     embed.add_field(name="Market Cap", value=f"${market_cap:,}", inline=True)
-    embed.add_field(name="🔢 Price Digits", value=price_4, inline=True)
-    embed.add_field(name="🔢 MCap Digits", value=mcap_4, inline=True)
     embed.add_field(name="Link", value=link, inline=False)
     await channel.send(embed=embed)
 
@@ -62,26 +49,13 @@ async def check_tokens(session, token_addresses):
                 continue
 
             name = base.get("name", "Unknown")
-            price_usd = token.get("priceUsd", "0")
             fdv = safe_int(token.get("fdv"))
             market_cap = safe_int(token.get("marketCap"))
-            price_digits = extract_significant_digits(price_usd)
-            mcap_digits = str(market_cap)[:4].ljust(4, '0')
-
-            try:
-                price_num = int(price_digits)
-                mcap_num = int(mcap_digits)
-            except ValueError:
-                price_num = 0
-                mcap_num = 0
-
-            threshold = 10
-
             link = token.get("url", "https://dexscreener.com")
 
-            if fdv != market_cap or abs(price_num - mcap_num) > threshold:
+            if fdv != market_cap and fdv > 0 and market_cap > 0:
                 alerted_tokens.add(token_address)
-                await send_alert(name, link, price_usd, fdv, market_cap, price_digits, mcap_digits)
+                await send_alert(name, link, fdv, market_cap)
 
     except Exception as e:
         print(f"Error checking tokens: {e}")
@@ -109,7 +83,6 @@ async def fetch_and_check():
                         print(f"Failed to fetch from {url}")
                         continue
                     data = await res.json()
-
                     if isinstance(data, list):
                         for token in data:
                             if token.get("chainId") == "solana":
@@ -126,7 +99,6 @@ async def fetch_and_check():
                         print(f"Failed to fetch from {url}")
                         continue
                     data = await res.json()
-
                     if isinstance(data, list):
                         for token in data:
                             token_address = token.get("mint") or token.get("id") or token.get("address")
