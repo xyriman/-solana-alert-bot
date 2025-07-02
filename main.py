@@ -67,12 +67,6 @@ async def fetch_and_check():
         "https://api.dexscreener.com/token-boosts/top/v1"
     ]
 
-    extra_sources = [
-        "https://lite-api.jup.ag/tokens/v1/new",
-        "https://lite-api.jup.ag/tokens/v2/recent",
-        "https://pub-4a2b3c4b893f4e25a61d89d3e729f98d.r2.dev/tokens.json"
-    ]
-
     token_addresses = set()
 
     async with aiohttp.ClientSession() as session:
@@ -92,21 +86,6 @@ async def fetch_and_check():
             except Exception as e:
                 print(f"Error fetching from {url}: {e}")
 
-        for url in extra_sources:
-            try:
-                async with session.get(url) as res:
-                    if res.status != 200:
-                        print(f"Failed to fetch from {url}")
-                        continue
-                    data = await res.json()
-                    if isinstance(data, list):
-                        for token in data:
-                            token_address = token.get("mint") or token.get("id") or token.get("address")
-                            if token_address:
-                                token_addresses.add(token_address)
-            except Exception as e:
-                print(f"Error fetching from {url}: {e}")
-
         token_list = list(token_addresses)
         for i in range(0, len(token_list), 30):
             chunk = token_list[i:i + 30]
@@ -120,3 +99,4 @@ async def on_ready():
         await asyncio.sleep(180)  # every 3 minutes
 
 client.run(DISCORD_TOKEN)
+
