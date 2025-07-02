@@ -5,10 +5,8 @@ import os
 from dotenv import load_dotenv
 load_dotenv()
 
-
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
 CHANNEL_ID = int(os.getenv("CHANNEL_ID"))
-
 
 intents = discord.Intents.default()
 client = discord.Client(intents=intents)
@@ -77,7 +75,7 @@ async def check_tokens(session, token_addresses):
                 price_num = 0
                 mcap_num = 0
 
-            threshold = 10  # Allowable difference in digits
+            threshold = 10
 
             link = token.get("url", "https://dexscreener.com")
 
@@ -89,16 +87,22 @@ async def check_tokens(session, token_addresses):
         print(f"Error checking tokens: {e}")
 
 async def fetch_and_check():
-    urls = [
+    dex_urls = [
         "https://api.dexscreener.com/token-profiles/latest/v1",
         "https://api.dexscreener.com/token-boosts/latest/v1",
         "https://api.dexscreener.com/token-boosts/top/v1"
     ]
 
+    extra_sources = [
+        "https://lite-api.jup.ag/tokens/v1/new",
+        "https://lite-api.jup.ag/tokens/v2/recent",
+        "https://pub-4a2b3c4b893f4e25a61d89d3e729f98d.r2.dev/tokens.json"
+    ]
+
     token_addresses = set()
 
     async with aiohttp.ClientSession() as session:
-        for url in urls:
+        for url in dex_urls:
             try:
                 async with session.get(url) as res:
                     if res.status != 200:
@@ -106,16 +110,28 @@ async def fetch_and_check():
                         continue
                     data = await res.json()
 
-                    if not isinstance(data, list):
-                        print(f"Unexpected format from {url}: expected list")
-                        continue
+                    if isinstance(data, list):
+                        for token in data:
+                            if token.get("chainId") == "solana":
+                                token_address = token.get("tokenAddress")
+                                if token_address:
+                                    token_addresses.add(token_address)
+            except Exception as e:
+                print(f"Error fetching from {url}: {e}")
 
-                    for token in data:
-                        if isinstance(token, dict) and token.get("chainId") == "solana":
-                            token_address = token.get("tokenAddress")
+        for url in extra_sources:
+            try:
+                async with session.get(url) as res:
+                    if res.status != 200:
+                        print(f"Failed to fetch from {url}")
+                        continue
+                    data = await res.json()
+
+                    if isinstance(data, list):
+                        for token in data:
+                            token_address = token.get("mint") or token.get("id") or token.get("address")
                             if token_address:
                                 token_addresses.add(token_address)
-
             except Exception as e:
                 print(f"Error fetching from {url}: {e}")
 
@@ -129,6 +145,6 @@ async def on_ready():
     print(f"✅ Logged in as {client.user}")
     while True:
         await fetch_and_check()
-        await asyncio.sleep(180)  # Check every 3 minutes
+        await asyncio.sleep(180)  # every 3 minutes
 
 client.run(DISCORD_TOKEN)
