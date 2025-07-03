@@ -3,100 +3,113 @@ import asyncio
 import aiohttp
 import os
 from dotenv import load_dotenv
+from bs4 import BeautifulSoup
+
 load_dotenv()
 
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
 CHANNEL_ID = int(os.getenv("CHANNEL_ID"))
 
+DEXTREND_URL = (
+    "https://dexscreener.com"
+    "/?rankBy=pairAge&order=asc"
+    "&chainIds=solana&dexIds=meteora&profile=1"
+)
+API_URL_TEMPLATE = "https://api.dexscreener.com/tokens/v1/solana/{addresses}"
+FETCH_LIMIT = 10  # Number of tokens to check each cycle
+ALERT_DIFF = 0.000001  # Threshold for price/mcap alert
+
 intents = discord.Intents.default()
-client = discord.Client(intents=intents)
+bot = discord.Client(intents=intents)
+seen_tokens = set()
 
-alerted_tokens = set()
-
-def safe_int(value):
+def should_alert(price, mcap, fdv):
     try:
-        return int(float(value))
-    except:
-        return 0
+        price = float(price)
+        mcap = float(mcap)
+        fdv = float(fdv)
+    except (TypeError, ValueError):
+        return False
 
-async def send_alert(name, link, fdv, market_cap):
-    channel = client.get_channel(CHANNEL_ID)
-    if channel is None:
-        print("❌ Channel not found. Check CHANNEL_ID.")
-        return
-    embed = discord.Embed(title="🚨 Solana Token Alert", color=0xff9900)
-    embed.add_field(name="Token", value=name, inline=False)
-    embed.add_field(name="FDV", value=f"${fdv:,}", inline=True)
-    embed.add_field(name="Market Cap", value=f"${market_cap:,}", inline=True)
-    embed.add_field(name="Link", value=link, inline=False)
-    await channel.send(embed=embed)
+    if abs(fdv - mcap) >= 1:
+        return True
 
-async def check_tokens(session, token_addresses):
-    if not token_addresses:
-        return
-    url = f"https://api.dexscreener.com/tokens/v1/solana/{','.join(token_addresses)}"
+    price_scaled = price * 1e9
+    price_digits = str(int(price_scaled))[:4]
+    mcap_digits = str(int(mcap))[:4]
+    if price_digits != mcap_digits:
+        if abs(price_scaled - mcap) >= ALERT_DIFF * 1e9:
+            return True
+
+    return False
+
+async def get_token_addresses():
     try:
-        async with session.get(url) as res:
-            if res.status != 200:
-                print(f"Failed to fetch token details: {res.status}")
-                return
-            data = await res.json()
-
-        for token in data:
-            base = token.get("baseToken", {})
-            token_address = base.get("address", "")
-            if token_address in alerted_tokens:
-                continue
-
-            name = base.get("name", "Unknown")
-            fdv = safe_int(token.get("fdv"))
-            market_cap = safe_int(token.get("marketCap"))
-            link = token.get("url", "https://dexscreener.com")
-
-            if fdv != market_cap and fdv > 0 and market_cap > 0:
-                alerted_tokens.add(token_address)
-                await send_alert(name, link, fdv, market_cap)
-
+        async with aiohttp.ClientSession() as session:
+            async with session.get(DEXTREND_URL, headers={"User-Agent":"Mozilla/5.0"}) as resp:
+                text = await resp.text()
+        soup = BeautifulSoup(text, "html.parser")
+        links = soup.select("a[href*='/solana/']")
+        addresses = []
+        for a in links[:FETCH_LIMIT]:
+            href = a.get("href")
+            addr = href.split("/")[-1]
+            addresses.append(addr)
+        return addresses
     except Exception as e:
-        print(f"Error checking tokens: {e}")
+        print(f"Error scraping token addresses: {e}")
+        return []
 
-async def fetch_and_check():
-    dex_urls = [
-        "https://api.dexscreener.com/token-profiles/latest/v1",
-        "https://api.dexscreener.com/token-boosts/latest/v1",
-        "https://api.dexscreener.com/token-boosts/top/v1"
-    ]
+async def fetch_token_data(addresses):
+    if not addresses:
+        return []
+    url = API_URL_TEMPLATE.format(addresses=",".join(addresses))
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url) as resp:
+                return await resp.json()
+    except Exception as e:
+        print(f"Error fetching token data: {e}")
+        return []
 
-    token_addresses = set()
+async def check_tokens_loop():
+    await bot.wait_until_ready()
+    channel = bot.get_channel(CHANNEL_ID)
 
-    async with aiohttp.ClientSession() as session:
-        for url in dex_urls:
-            try:
-                async with session.get(url) as res:
-                    if res.status != 200:
-                        print(f"Failed to fetch from {url}")
-                        continue
-                    data = await res.json()
-                    if isinstance(data, list):
-                        for token in data:
-                            if token.get("chainId") == "solana":
-                                token_address = token.get("tokenAddress")
-                                if token_address:
-                                    token_addresses.add(token_address)
-            except Exception as e:
-                print(f"Error fetching from {url}: {e}")
-
-        token_list = list(token_addresses)
-        for i in range(0, len(token_list), 30):
-            chunk = token_list[i:i + 30]
-            await check_tokens(session, chunk)
-
-@client.event
-async def on_ready():
-    print(f"✅ Logged in as {client.user}")
     while True:
-        await fetch_and_check()
-        await asyncio.sleep(180)  # every 3 minutes
+        token_addresses = await get_token_addresses()
+        new_tokens = [t for t in token_addresses if t not in seen_tokens]
 
-client.run(DISCORD_TOKEN)
+        if new_tokens:
+            token_data_list = await fetch_token_data(new_tokens)
+
+            for token_data in token_data_list:
+                base_token = token_data.get("baseToken", {})
+                addr = base_token.get("address")
+                name = base_token.get("name", addr)
+                price = token_data.get("priceUsd")
+                market_cap = token_data.get("marketCap")
+                fdv = token_data.get("fdv")
+
+                if addr and should_alert(price, market_cap, fdv):
+                    seen_tokens.add(addr)
+                    msg = (
+                        f"🚨 **Mismatch detected** for **{name}**\n"
+                        f"Price USD: `{price}`\n"
+                        f"Market Cap: `{market_cap}`\n"
+                        f"FDV: `{fdv}`\n"
+                        f"<https://dexscreener.com/solana/{addr}>"
+                    )
+                    await channel.send(msg)
+
+        await asyncio.sleep(180)
+
+@bot.event
+async def on_ready():
+    print(f"Logged in as {bot.user}")
+    bot.loop.create_task(check_tokens_loop())
+
+if __name__ == "__main__":
+    bot.run(DISCORD_TOKEN)
+
 
