@@ -23,12 +23,6 @@ API_URL_TEMPLATE = "https://api.dexscreener.com/tokens/v1/solana/{addresses}"
 FETCH_LIMIT = 10
 ALERT_DIFF = 0.000001
 
-def safe_int(value):
-    try:
-        return int(float(value))
-    except:
-        return 0
-
 def should_alert(price, mcap, fdv):
     try:
         price = float(price)
@@ -48,7 +42,19 @@ def should_alert(price, mcap, fdv):
             return True
     return False
 
-async def send_alert(name, link, fdv, market_cap, price):
+async def has_community_takeover(session, address):
+    url = f"https://dexscreener.com/solana/{address}"
+    try:
+        async with session.get(url, headers={"User-Agent": "Mozilla/5.0"}) as res:
+            html = await res.text()
+            soup = BeautifulSoup(html, "html.parser")
+            link = soup.select_one("a[href*='token-community-takeover']")
+            return link is not None
+    except Exception as e:
+        print(f"Error checking community takeover for {address}: {e}")
+        return False
+
+async def send_alert(name, link, fdv, market_cap, price, community_takeover):
     channel = client.get_channel(CHANNEL_ID)
     if channel is None:
         print("❌ Channel not found. Check CHANNEL_ID.")
@@ -58,6 +64,8 @@ async def send_alert(name, link, fdv, market_cap, price):
     embed.add_field(name="Price", value=f"${price}", inline=True)
     embed.add_field(name="FDV", value=f"${fdv:,}", inline=True)
     embed.add_field(name="Market Cap", value=f"${market_cap:,}", inline=True)
+    if community_takeover:
+        embed.add_field(name="🧠 Community Takeover", value="Yes", inline=False)
     embed.add_field(name="Link", value=link, inline=False)
     await channel.send(embed=embed)
 
@@ -90,17 +98,18 @@ async def check_scraped_tokens():
             async with aiohttp.ClientSession() as session:
                 async with session.get(url) as res:
                     data = await res.json()
-            for token in data:
-                base = token.get("baseToken", {})
-                addr = base.get("address")
-                name = base.get("name", addr)
-                price = token.get("priceUsd")
-                mcap = token.get("marketCap")
-                fdv = token.get("fdv")
-                link = f"https://dexscreener.com/solana/{addr}"
-                if addr and addr not in alerted_tokens and should_alert(price, mcap, fdv):
-                    alerted_tokens.add(addr)
-                    await send_alert(name, link, fdv, mcap, price)
+                for token in data:
+                    base = token.get("baseToken", {})
+                    addr = base.get("address")
+                    name = base.get("name", addr)
+                    price = token.get("priceUsd")
+                    mcap = token.get("marketCap")
+                    fdv = token.get("fdv")
+                    link = f"https://dexscreener.com/solana/{addr}"
+                    if addr and addr not in alerted_tokens and should_alert(price, mcap, fdv):
+                        community = await has_community_takeover(session, addr)
+                        alerted_tokens.add(addr)
+                        await send_alert(name, link, fdv, mcap, price, community)
         except Exception as e:
             print(f"Error in scraping alert check: {e}")
         await asyncio.sleep(180)
@@ -141,8 +150,9 @@ async def check_api_tokens():
                             fdv = token.get("fdv")
                             link = f"https://dexscreener.com/solana/{addr}"
                             if addr and addr not in alerted_tokens and should_alert(price, mcap, fdv):
+                                community = await has_community_takeover(session, addr)
                                 alerted_tokens.add(addr)
-                                await send_alert(name, link, fdv, mcap, price)
+                                await send_alert(name, link, fdv, mcap, price, community)
                 except Exception as e:
                     print(f"Token check error: {e}")
         await asyncio.sleep(180)
